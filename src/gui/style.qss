@@ -1,0 +1,3 @@
+#CardSelector { background: #f8f9fb; border: 1px solid #d0d4da; }
+#SelectedStatusBar { background: #fefefe; border: 1px solid #d0d4da; }
+QPushButton { padding: 6px 10px; }
