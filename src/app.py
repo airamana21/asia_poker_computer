@@ -4,11 +4,16 @@ import multiprocessing
 import os
 import sys
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from PySide6.QtCore import QFile, QTextStream
 from PySide6.QtWidgets import QApplication
 
-from .gui.main_window import MainWindow
-from .utils.resources import get_resource_path
+from src.gui.main_window import MainWindow
+from src.utils.resources import get_resource_path
 
 
 def main():
