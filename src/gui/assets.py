@@ -7,9 +7,9 @@ from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 
 from ..core.cards import Card, SUITS, RANKS, JOKER, png_name
+from ..utils.resources import get_assets_dir
 
-ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "assets", "cards")
-ASSETS_DIR = os.path.normpath(ASSETS_DIR)
+ASSETS_DIR = get_assets_dir()
 
 CARD_W, CARD_H = 160, 224
 

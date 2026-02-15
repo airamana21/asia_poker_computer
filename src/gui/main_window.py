@@ -59,7 +59,23 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("asia_poker_computer", "app")
 
         self._scale = 0.0       # force first apply
-        self._resizing = False   # guard against recursive resize
+        self._programmatic_resize = False   # flag for aspect ratio corrections
+        
+        # Timer to debounce scale updates during resize
+        self._scale_update_timer = QTimer()
+        self._scale_update_timer.setSingleShot(True)
+        self._scale_update_timer.setInterval(10)
+        self._scale_update_timer.timeout.connect(self._apply_scale)
+        
+        # Timer to enforce aspect ratio only AFTER resize completes
+        self._aspect_correction_timer = QTimer()
+        self._aspect_correction_timer.setSingleShot(True)
+        self._aspect_correction_timer.setInterval(150)  # Wait 150ms after last resize
+        self._aspect_correction_timer.timeout.connect(self._enforce_aspect_ratio)
+        
+        # Track last resize dimensions for aspect ratio correction
+        self._last_resize_w = 0
+        self._last_resize_h = 0
 
         # State
         self.selected: List[Card] = []
@@ -270,39 +286,77 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):  # type: ignore[override]
         super().resizeEvent(event)
-        if self._resizing:
+        
+        # Skip processing if this is our own programmatic resize
+        if self._programmatic_resize:
+            self._programmatic_resize = False
             return
-        self._resizing = True
-        try:
-            new_w = event.size().width()
-            new_h = event.size().height()
-            old_w = event.oldSize().width() if event.oldSize().width() > 0 else new_w
-            old_h = event.oldSize().height() if event.oldSize().height() > 0 else new_h
-
-            # Determine which dimension the user changed more
-            dw = abs(new_w - old_w)
-            dh = abs(new_h - old_h)
-
-            if dw >= dh:
-                # Width changed → adjust height to maintain aspect ratio
-                target_h = int(new_w / _ASPECT)
-                if target_h != new_h:
-                    self.resize(new_w, target_h)
-            else:
-                # Height changed → adjust width to maintain aspect ratio
-                target_w = int(new_h * _ASPECT)
-                if target_w != new_w:
-                    self.resize(target_w, new_h)
-
-            # Update splitter proportions
-            total = self.splitter.width()
-            if total > 0:
-                left = int(total * _LEFT_FRAC)
-                self.splitter.setSizes([left, total - left])
-
-            self._apply_scale()
-        finally:
-            self._resizing = False
+        
+        new_w = event.size().width()
+        new_h = event.size().height()
+        
+        # Store dimensions for later aspect ratio correction
+        self._last_resize_w = new_w
+        self._last_resize_h = new_h
+        
+        # Update layout elements immediately for smooth visual feedback
+        self._update_layout()
+        
+        # Restart the aspect correction timer
+        # This means we only enforce aspect ratio 150ms after the user stops resizing
+        self._aspect_correction_timer.start()
+    
+    def _enforce_aspect_ratio(self):
+        """
+        Enforce aspect ratio after resize completes (debounced).
+        This is called 150ms after the last resize event.
+        """
+        w = self._last_resize_w
+        h = self._last_resize_h
+        
+        if w <= 0 or h <= 0:
+            return
+        
+        # Calculate expected dimensions for aspect ratio
+        expected_h = round(w / _ASPECT)
+        expected_w = round(h * _ASPECT)
+        
+        # Determine which dimension to base the correction on
+        dw = abs(w - self.width())
+        dh = abs(h - self.height())
+        
+        # Use a tolerance to avoid unnecessary tiny corrections
+        TOLERANCE = 2
+        
+        target_w, target_h = w, h
+        needs_correction = False
+        
+        if dw >= dh:
+            # Width was changed more → adjust height
+            if abs(expected_h - h) > TOLERANCE:
+                target_h = expected_h
+                needs_correction = True
+        else:
+            # Height was changed more → adjust width
+            if abs(expected_w - w) > TOLERANCE:
+                target_w = expected_w
+                needs_correction = True
+        
+        if needs_correction:
+            self._programmatic_resize = True
+            self.resize(target_w, target_h)
+    
+    def _update_layout(self):
+        """Update splitter proportions and scale without triggering resize."""
+        # Update splitter proportions
+        total = self.splitter.width()
+        if total > 0:
+            left = int(total * _LEFT_FRAC)
+            self.splitter.setSizes([left, total - left])
+        
+        # Debounce scale updates using timer to avoid excessive recalculations
+        if not self._scale_update_timer.isActive():
+            self._scale_update_timer.start()
 
     def closeEvent(self, event):  # type: ignore[override]
         self.settings.setValue(

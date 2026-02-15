@@ -76,7 +76,120 @@ $env:ASIA_POKER_WORKERS=4; python -m src.app   # Windows PowerShell
 | 6-worker multiprocessing + caching | **~2.5 s** |
 
 ## Project layout
-See [plans/architecture.md](plans/architecture.md) and rules in [docs/rules.md](docs/rules.md).
+See [`plans/architecture.md`](plans/architecture.md) and rules in [`docs/rules.md`](docs/rules.md).
 
-## Packaging (optional)
-Later we can add PyInstaller specs for one‑click builds on Windows/macOS.
+## Building Standalone Executables
+
+Create one-click distributable executables for Windows and macOS using PyInstaller. The build scripts automatically handle dependency installation, asset generation, and packaging.
+
+### Windows Build
+
+**Requirements**: Python 3.8+ installed and in PATH
+
+**One-click build**:
+```powershell
+.\build_windows.ps1
+```
+
+This script will:
+1. Create/activate a virtual environment
+2. Install dependencies + PyInstaller
+3. Generate card assets
+4. Build the executable with PyInstaller
+5. Output to `dist/AsiaPoker421/AsiaPoker421.exe`
+
+**Manual build** (if needed):
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install pyinstaller
+python -c "from src.gui.assets import ensure_assets; ensure_assets()"
+pyinstaller --clean --noconfirm build_windows.spec
+```
+
+**Distribution**: ZIP the entire `dist/AsiaPoker421` folder. Users extract and run `AsiaPoker421.exe`.
+
+### macOS Build
+
+**Requirements**: Python 3.8+ (typically `python3`)
+
+**One-click build**:
+```bash
+chmod +x build_macos.sh  # First time only
+./build_macos.sh
+```
+
+This script will:
+1. Create/activate a virtual environment
+2. Install dependencies + PyInstaller
+3. Generate card assets
+4. Build the app bundle with PyInstaller
+5. Output to `dist/AsiaPoker421.app`
+
+**Manual build** (if needed):
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install pyinstaller
+python -c "from src.gui.assets import ensure_assets; ensure_assets()"
+pyinstaller --clean --noconfirm build_macos.spec
+```
+
+**Distribution**: Create a DMG or ZIP the `.app` bundle.
+
+**Gatekeeper Note**: Unsigned apps show a security warning on first launch. Users should right-click → Open (not double-click) the first time to bypass Gatekeeper.
+
+### Build Output Sizes
+
+| Platform | Uncompressed | Compressed (ZIP) |
+|----------|--------------|------------------|
+| Windows  | ~80-105 MB   | ~30-40 MB        |
+| macOS    | ~90-115 MB   | ~35-45 MB        |
+
+Sizes include Qt6 framework, PySide6, NumPy, and bundled card assets.
+
+### Technical Details
+
+The packaging solution addresses several challenges:
+
+1. **Resource Paths**: [`src/utils/resources.py`](src/utils/resources.py) detects PyInstaller's frozen mode and resolves bundled files correctly
+2. **Multiprocessing**: [`multiprocessing.freeze_support()`](src/app.py:13) enables parallel simulation in frozen executables
+3. **Writable Assets**: In frozen mode, card assets are copied to user data directories:
+   - Windows: `%LOCALAPPDATA%/AsiaPoker421/assets/cards`
+   - macOS: `~/Library/Application Support/AsiaPoker421/assets/cards`
+4. **QSS Stylesheet**: Bundled and loaded via resource path helper
+
+See [`plans/packaging.md`](plans/packaging.md) for complete implementation details.
+
+### Distribution Best Practices
+
+**For Windows users**:
+1. Extract the ZIP archive
+2. Run `AsiaPoker421.exe`
+3. Windows Defender may scan the executable on first run (normal behavior)
+4. Card images generate automatically on first launch if needed
+
+**For macOS users**:
+1. Extract/mount the archive
+2. Move `AsiaPoker421.app` to Applications folder (optional)
+3. **First launch only**: Right-click → Open (bypasses Gatekeeper)
+4. Subsequent launches: Double-click normally
+
+### Known Issues
+
+| Issue | Workaround |
+|-------|------------|
+| Antivirus false positive (Windows) | Expected for unsigned PyInstaller executables; source code available for verification |
+| macOS Gatekeeper warning | Right-click → Open on first launch; consider code signing for professional distribution |
+| Large download size | Qt6 framework is bundled; size is normal for PySide6 applications |
+| Slow first launch | PyInstaller extracts to temp directory; subsequent launches are faster |
+
+### Future Enhancements
+
+- Code signing (Windows Authenticode, macOS Developer ID)
+- macOS notarization for seamless Gatekeeper approval
+- Custom installers (WiX Toolset for Windows, DMG with background for macOS)
+- CI/CD automation with GitHub Actions
+- Linux support (AppImage or Flatpak)
