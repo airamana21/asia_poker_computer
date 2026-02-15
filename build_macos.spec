@@ -5,7 +5,7 @@ block_cipher = None
 
 a = Analysis(
     ['src/app.py'],
-    pathex=[],
+    pathex=[os.path.abspath('.')],
     binaries=[],
     datas=[
         ('src/gui/style.qss', 'src/gui'),
@@ -23,6 +23,13 @@ a = Analysis(
         'src.core.house_way',
         'src.core.simulate',
         'src.core.evaluator',
+        'src.gui.main_window',
+        'src.gui.assets',
+        'src.gui.card_selector',
+        'src.gui.results_panel',
+        'src.gui.selected_status_bar',
+        'src.gui.workers',
+        'src.utils.resources',
     ],
     hookspath=[],
     hooksconfig={},
