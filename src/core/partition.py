@@ -4,7 +4,7 @@ from itertools import combinations
 from typing import Iterable, List, Sequence, Tuple
 
 from .cards import Card
-from .ranks import score1, score2, score4, compare_scores, Score
+from .ranks import score1, score2, score4, Score
 
 Partition = Tuple[Tuple[Card, ...], Tuple[Card, ...], Tuple[Card, ...]]  # (4,2,1)
 

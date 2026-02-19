@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 from .cards import Card, JOKER, RANK_TO_VAL, RANKS
 
@@ -236,3 +236,25 @@ def clear_score_caches():
     _cached_score4.cache_clear()
     _cached_score2.cache_clear()
     _cached_score1.cache_clear()
+
+
+# ── NumPy int64 encoding for vectorized simulation ────────────
+# Each Score (cat, keys) is encoded into a single int64 using base-15
+# positional weighting.  All rank values are 0–14, so base 15 is safe.
+# The fixed-width representation is [cat, key0, key1, key2, key3, key4]
+# padded with zeros so that lexicographic tuple comparison and integer
+# comparison produce identical orderings.
+
+_POW = (759375, 50625, 3375, 225, 15, 1)  # 15**5 .. 15**0
+
+
+def score_to_int(score: Score) -> int:
+    """Encode a Score as a single int64 for fast NumPy comparison.
+
+    The encoding preserves lexicographic ordering: for any two Scores a, b,
+    ``a.tuple() > b.tuple()`` iff ``score_to_int(a) > score_to_int(b)``.
+    """
+    result = score.cat * 759375  # cat * 15**5
+    for i, k in enumerate(score.keys):
+        result += k * _POW[i + 1]
+    return result

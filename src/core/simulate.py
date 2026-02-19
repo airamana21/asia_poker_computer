@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import os
 import random
-import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Callable, Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, List, Sequence, Tuple
+
+import numpy as np
 
 from .cards import Card, remaining_deck
 from .partition import RankedPartition, all_ranked_non_foul
 from .house_way import set_dealer_421
-from .ranks import compare_scores, Score
+from .ranks import Score, score_to_int
 
 # ── Configuration ─────────────────────────────────────────────
 # Number of worker processes.  Override with ASIA_POKER_WORKERS env var.
@@ -19,6 +20,9 @@ _WORKERS = int(os.environ.get("ASIA_POKER_WORKERS", _MAX_WORKERS))
 
 # Minimum samples before we bother spawning subprocesses
 _MP_THRESHOLD = 2000
+
+# Set ASIA_POKER_NO_NUMPY=1 to fall back to pure-Python loops (debug only)
+_USE_NUMPY = not bool(int(os.environ.get("ASIA_POKER_NO_NUMPY", "0")))
 
 
 class SimResult:
@@ -40,6 +44,77 @@ class SimResult:
 
 def _sim_chunk(
     deck_cards: List[Tuple[str, str | None]],
+    player_ints_flat: List[List[int]],   # shape (P, 3) as nested list
+    chunk_size: int,
+    seed: int,
+) -> Tuple[List[int], List[int], List[int]]:
+    """Run *chunk_size* Monte Carlo samples in this worker process.
+
+    Uses batched NumPy vectorized comparison of all player partitions
+    against batches of dealer hands.  Arguments use plain Python types
+    for pickling on Windows (spawn).
+
+    Returns (W, L, P) lists of length P.
+    """
+    import numpy as _np
+    from .cards import Card as C
+    from .house_way import set_dealer_421 as _dealer_421
+    from .ranks import score_to_int as _s2i
+
+    _B = 500  # batch size
+
+    rng = random.Random(seed)
+    pi = _np.array(player_ints_flat, dtype=_np.int64)  # (P, 3)
+    p4, p2, p1 = pi[:, 0], pi[:, 1], pi[:, 2]         # each (P,)
+    n_parts = pi.shape[0]
+
+    W = _np.zeros(n_parts, dtype=_np.int64)
+    L = _np.zeros(n_parts, dtype=_np.int64)
+    P = _np.zeros(n_parts, dtype=_np.int64)
+
+    deck = [C(rank, suit) for rank, suit in deck_cards]
+
+    d4_buf = _np.empty(_B, dtype=_np.int64)
+    d2_buf = _np.empty(_B, dtype=_np.int64)
+    d1_buf = _np.empty(_B, dtype=_np.int64)
+
+    for batch_start in range(0, chunk_size, _B):
+        B = min(_B, chunk_size - batch_start)
+
+        for j in range(B):
+            dealer7 = rng.sample(deck, 7)
+            dealer = _dealer_421(dealer7)
+            d4_buf[j] = _s2i(dealer.s4)
+            d2_buf[j] = _s2i(dealer.s2)
+            d1_buf[j] = _s2i(dealer.s1)
+
+        d4 = d4_buf[:B]
+        d2 = d2_buf[:B]
+        d1 = d1_buf[:B]
+
+        w4 = p4[:, None] > d4[None, :]
+        w2 = p2[:, None] > d2[None, :]
+        w1 = p1[:, None] > d1[None, :]
+
+        l4 = p4[:, None] < d4[None, :]
+        l2 = p2[:, None] < d2[None, :]
+        l1 = p1[:, None] < d1[None, :]
+
+        sub_wins = w4.view(_np.uint8) + w2.view(_np.uint8) + w1.view(_np.uint8)
+        sub_losses = l4.view(_np.uint8) + l2.view(_np.uint8) + l1.view(_np.uint8)
+
+        w_flag = sub_wins >= 2
+        l_flag = sub_losses >= 2
+
+        W += w_flag.sum(axis=1)
+        L += l_flag.sum(axis=1)
+        P += (~(w_flag | l_flag)).sum(axis=1)
+
+    return W.tolist(), L.tolist(), P.tolist()
+
+
+def _sim_chunk_pure(
+    deck_cards: List[Tuple[str, str | None]],
     part_score_tuples: List[Tuple[
         Tuple[int, Tuple[int, ...]],
         Tuple[int, Tuple[int, ...]],
@@ -48,14 +123,7 @@ def _sim_chunk(
     chunk_size: int,
     seed: int,
 ) -> Tuple[List[int], List[int], List[int]]:
-    """Run *chunk_size* Monte Carlo samples in this worker process.
-
-    Arguments use plain Python types for pickling on Windows (spawn).
-    Each worker gets a large chunk so its LRU score caches warm up
-    and subsequent evaluations benefit from cache hits.
-
-    Returns (W, L, P) lists of length == len(part_score_tuples).
-    """
+    """Pure-Python fallback for _sim_chunk (no NumPy)."""
     from .cards import Card as C
     from .house_way import set_dealer_421 as _dealer_421
 
@@ -66,7 +134,6 @@ def _sim_chunk(
     L = [0] * n_parts
     P = [0] * n_parts
 
-    # Rebuild deck as Card objects inside this process (once)
     deck = [C(rank, suit) for rank, suit in deck_cards]
 
     for _ in range(chunk_size):
@@ -80,7 +147,6 @@ def _sim_chunk(
             ps4, ps2, ps1 = part_score_tuples[idx]
             ww = 0
             ll = 0
-            # Inline comparisons for speed
             if ps4 > ds4:
                 ww += 1
             elif ps4 < ds4:
@@ -118,8 +184,8 @@ def simulate_best(
     """Monte Carlo estimate of the best 4-2-1 against dealer House Way.
 
     Uses multiprocessing when *samples* >= _MP_THRESHOLD and _WORKERS > 1.
-    Each worker gets samples/workers samples (large chunks) so its per-process
-    LRU score caches warm up and deliver high hit rates.
+    Inner partition comparison is vectorized via NumPy int64 encoding
+    unless ASIA_POKER_NO_NUMPY=1 is set.
 
     Returns: (best_result, all_results_sorted_desc)
     """
@@ -137,30 +203,37 @@ def simulate_best(
     use_mp = _WORKERS > 1 and n >= _MP_THRESHOLD
 
     if not use_mp:
-        return _simulate_single(parts, deck, n, rng, progress, cancel)
+        if _USE_NUMPY:
+            return _simulate_single_numpy(parts, deck, n, rng, progress, cancel)
+        return _simulate_single_pure(parts, deck, n, rng, progress, cancel)
 
     # ── Multi-process path ────────────────────────────────────
-    # Serialize to lightweight tuples for pickling
     deck_cards = [(c.rank, c.suit) for c in deck]
 
-    # Pre-compute score tuples (plain tuples, not Score objects)
-    part_score_tuples = [
-        (rp.s4.tuple(), rp.s2.tuple(), rp.s1.tuple())
-        for rp in parts
-    ]
+    # Choose chunk function and data format based on numpy availability
+    if _USE_NUMPY:
+        player_ints_flat = [
+            [score_to_int(rp.s4), score_to_int(rp.s2), score_to_int(rp.s1)]
+            for rp in parts
+        ]
+        chunk_fn = _sim_chunk
+    else:
+        part_score_tuples = [
+            (rp.s4.tuple(), rp.s2.tuple(), rp.s1.tuple())
+            for rp in parts
+        ]
+        chunk_fn = _sim_chunk_pure
 
     # Give each worker one large chunk (= samples / workers)
-    # so per-process LRU caches warm up and stay effective.
     workers = min(_WORKERS, max(1, n // _MP_THRESHOLD))
     base = n // workers
     remainder = n % workers
 
-    chunks: List[Tuple[int, int]] = []  # (chunk_size, seed)
+    chunks: List[Tuple[int, int]] = []
     for w in range(workers):
         cs = base + (1 if w < remainder else 0)
         chunks.append((cs, rng.randint(0, 2**63)))
 
-    # Aggregated counters
     W = [0] * num_parts
     L = [0] * num_parts
     P = [0] * num_parts
@@ -170,10 +243,8 @@ def simulate_best(
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {}
             for cs, s in chunks:
-                fut = executor.submit(
-                    _sim_chunk,
-                    deck_cards, part_score_tuples, cs, s,
-                )
+                payload = player_ints_flat if _USE_NUMPY else part_score_tuples
+                fut = executor.submit(chunk_fn, deck_cards, payload, cs, s)
                 futures[fut] = cs
 
             for fut in as_completed(futures):
@@ -194,7 +265,9 @@ def simulate_best(
                     progress(completed_samples / n)
 
     except (BrokenPipeError, OSError):
-        return _simulate_single(parts, deck, n, rng, progress, cancel)
+        if _USE_NUMPY:
+            return _simulate_single_numpy(parts, deck, n, rng, progress, cancel)
+        return _simulate_single_pure(parts, deck, n, rng, progress, cancel)
 
     results: List[SimResult] = [
         SimResult(rp=parts[i], wins=W[i], losses=L[i], pushes=P[i])
@@ -207,7 +280,12 @@ def simulate_best(
     return best, results
 
 
-def _simulate_single(
+# Batch size for vectorized comparison — accumulate this many dealer hands
+# before comparing against all player partitions in one NumPy operation.
+_BATCH = 500
+
+
+def _simulate_single_numpy(
     parts: List[RankedPartition],
     deck: List[Card],
     n: int,
@@ -215,13 +293,105 @@ def _simulate_single(
     progress: Callable[[float], None] | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> Tuple[SimResult, List[SimResult]]:
-    """Single-process simulation loop with tuple-based score comparison."""
+    """NumPy-vectorized single-process simulation loop.
+
+    Dealer hands are scored in Python (house-way logic is branchy), but the
+    comparison of all P player partitions against a *batch* of B dealer hands
+    is done in one vectorized operation: (P, 1) vs (1, B) broadcast per
+    sub-hand, giving a real speedup over the pure-Python inner loop.
+    """
+    num_parts = len(parts)
+
+    # Pre-compute player score int64 columns — contiguous (P,) each
+    p4 = np.array([score_to_int(rp.s4) for rp in parts], dtype=np.int64)
+    p2 = np.array([score_to_int(rp.s2) for rp in parts], dtype=np.int64)
+    p1 = np.array([score_to_int(rp.s1) for rp in parts], dtype=np.int64)
+
+    W = np.zeros(num_parts, dtype=np.int64)
+    L = np.zeros(num_parts, dtype=np.int64)
+    P = np.zeros(num_parts, dtype=np.int64)
+
+    completed = 0
+    cancelled = False
+
+    # Pre-allocate dealer batch buffer
+    d4_buf = np.empty(_BATCH, dtype=np.int64)
+    d2_buf = np.empty(_BATCH, dtype=np.int64)
+    d1_buf = np.empty(_BATCH, dtype=np.int64)
+
+    for batch_start in range(0, n, _BATCH):
+        if cancelled:
+            break
+        B = min(_BATCH, n - batch_start)
+
+        # Fill dealer batch (Python loop — house-way is branchy)
+        for j in range(B):
+            if cancel and cancel():
+                cancelled = True
+                B = j  # only use hands scored so far
+                break
+            dealer7 = rng.sample(deck, 7)
+            dealer = set_dealer_421(dealer7)
+            d4_buf[j] = score_to_int(dealer.s4)
+            d2_buf[j] = score_to_int(dealer.s2)
+            d1_buf[j] = score_to_int(dealer.s1)
+
+        if B == 0:
+            break
+
+        # Slices for this batch
+        d4 = d4_buf[:B]
+        d2 = d2_buf[:B]
+        d1 = d1_buf[:B]
+
+        # Vectorized comparison: (P, 1) vs (1, B) -> (P, B) per sub-hand
+        w4 = p4[:, None] > d4[None, :]  # (P, B) bool
+        w2 = p2[:, None] > d2[None, :]
+        w1 = p1[:, None] > d1[None, :]
+
+        l4 = p4[:, None] < d4[None, :]
+        l2 = p2[:, None] < d2[None, :]
+        l1 = p1[:, None] < d1[None, :]
+
+        sub_wins = w4.view(np.uint8) + w2.view(np.uint8) + w1.view(np.uint8)    # (P, B)
+        sub_losses = l4.view(np.uint8) + l2.view(np.uint8) + l1.view(np.uint8)  # (P, B)
+
+        w_flag = sub_wins >= 2  # (P, B)
+        l_flag = sub_losses >= 2
+
+        W += w_flag.sum(axis=1)
+        L += l_flag.sum(axis=1)
+        P += (~(w_flag | l_flag)).sum(axis=1)
+
+        completed += B
+        if progress:
+            progress(completed / n)
+
+    results: List[SimResult] = [
+        SimResult(rp=parts[i], wins=int(W[i]), losses=int(L[i]), pushes=int(P[i]))
+        for i in range(num_parts)
+    ]
+    results.sort(key=lambda r: (r.win_rate, r.wins), reverse=True)
+    best = results[0]
+    if progress:
+        progress(1.0)
+    return best, results
+
+
+def _simulate_single_pure(
+    parts: List[RankedPartition],
+    deck: List[Card],
+    n: int,
+    rng: random.Random,
+    progress: Callable[[float], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> Tuple[SimResult, List[SimResult]]:
+    """Pure-Python single-process simulation loop (fallback)."""
     num_parts = len(parts)
     W = [0] * num_parts
     L = [0] * num_parts
     P = [0] * num_parts
 
-    # Pre-compute player score tuples for fast comparison
     p_scores = [
         (rp.s4.tuple(), rp.s2.tuple(), rp.s1.tuple())
         for rp in parts
