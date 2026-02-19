@@ -19,10 +19,41 @@ class ResultsPanel(QScrollArea):
         self.v = QVBoxLayout(container)
         self.setWidget(container)
         self._scale = 1.0
-        self._entries: List[tuple[str, Tuple[Card, ...], Tuple[Card, ...], Tuple[Card, ...], float]] = []
         self._card_ratio = 0.65
         self._title_base_pt: float | None = None
         self._group_base_pt: float | None = None
+
+        # House Way state
+        self._hw_hi: Tuple[Card, ...] | None = None
+        self._hw_mid: Tuple[Card, ...] | None = None
+        self._hw_low: Tuple[Card, ...] | None = None
+        self._hw_win_rate: float | None = None
+        self._hw_is_best: bool = False
+
+        # Simulation result entries: (title, hi, mid, low, win_rate)
+        self._sim_entries: List[Tuple[str, Tuple[Card, ...], Tuple[Card, ...], Tuple[Card, ...], float]] = []
+
+    # ── Public API ──────────────────────────────────────────
+
+    def show_house_way(
+        self,
+        hi: Sequence[Card],
+        mid: Sequence[Card],
+        low: Sequence[Card],
+    ):
+        """Display the House Way arrangement at the top of the results area."""
+        self._hw_hi = tuple(hi)
+        self._hw_mid = tuple(mid)
+        self._hw_low = tuple(low)
+        self._hw_win_rate = None
+        self._hw_is_best = False
+        self._rerender()
+
+    def mark_house_way_as_best(self, win_rate: float):
+        """Update the House Way entry to indicate it equals the simulated best."""
+        self._hw_win_rate = win_rate
+        self._hw_is_best = True
+        self._rerender()
 
     def show_result(
         self,
@@ -32,18 +63,23 @@ class ResultsPanel(QScrollArea):
         low: Sequence[Card],
         win_rate: float,
     ):
-        entry = (
-            title,
-            tuple(hi),
-            tuple(mid),
-            tuple(low),
-            win_rate,
-        )
-        self._entries.append(entry)
-        self._render_entry(entry)
+        """Append a simulation result entry below the House Way."""
+        self._sim_entries.append((title, tuple(hi), tuple(mid), tuple(low), win_rate))
+        self._rerender()
+
+    def clear_sim_results(self):
+        """Clear only simulation results, preserving the House Way."""
+        self._sim_entries.clear()
+        self._hw_win_rate = None
+        self._hw_is_best = False
+        self._rerender()
 
     def clear_results(self):
-        self._entries.clear()
+        """Clear everything (House Way + simulation results)."""
+        self._hw_hi = self._hw_mid = self._hw_low = None
+        self._hw_win_rate = None
+        self._hw_is_best = False
+        self._sim_entries.clear()
         self._remove_widgets()
 
     def set_scale(self, scale: float):
@@ -51,6 +87,8 @@ class ResultsPanel(QScrollArea):
             return
         self._scale = scale
         self._rerender()
+
+    # ── Internal rendering ──────────────────────────────────
 
     def _remove_widgets(self):
         while self.v.count():
@@ -61,11 +99,25 @@ class ResultsPanel(QScrollArea):
 
     def _rerender(self):
         self._remove_widgets()
-        for entry in self._entries:
-            self._render_entry(entry)
 
-    def _render_entry(self, entry: tuple[str, Tuple[Card, ...], Tuple[Card, ...], Tuple[Card, ...], float]):
-        title, hi, mid, low, win_rate = entry
+        # 1. House Way entry (always first)
+        if self._hw_hi is not None:
+            if self._hw_is_best and self._hw_win_rate is not None:
+                hw_title = f"House Way = Best — Win 2 of 3: {self._hw_win_rate:.2%}"
+            else:
+                hw_title = "House Way"
+            self._render_entry(hw_title, self._hw_hi, self._hw_mid, self._hw_low,
+                               self._hw_win_rate)
+
+        # 2. Simulation result entries
+        for title, hi, mid, low, wr in self._sim_entries:
+            self._render_entry(title, hi, mid, low, wr)
+
+        # Push entries to top so they don't stretch to fill the scroll area
+        self.v.addStretch(1)
+
+    def _render_entry(self, title: str, hi: Tuple[Card, ...], mid: Tuple[Card, ...],
+                      low: Tuple[Card, ...], win_rate: float | None):
         box = QFrame()
         box.setFrameShape(QFrame.Shape.StyledPanel)
         lay = QVBoxLayout(box)
@@ -77,7 +129,11 @@ class ResultsPanel(QScrollArea):
         )
         lay.setSpacing(int(6 * self._scale))
 
-        title_label = QLabel(f"{title} — Win 2 of 3: {win_rate:.2%}")
+        if win_rate is not None:
+            title_text = f"{title} — Win 2 of 3: {win_rate:.2%}" if "Win 2 of 3" not in title else title
+        else:
+            title_text = title
+        title_label = QLabel(title_text)
         self._set_font_size(title_label, "title")
         lay.addWidget(title_label)
 

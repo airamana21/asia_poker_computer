@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.cards import Card, parse
-from ..core.evaluator import evaluate_best_setup
+from ..core.evaluator import evaluate_best_setup, house_way_result
+from ..core.partition import RankedPartition
 from .assets import ensure_assets, CARD_W, CARD_H
 from .card_selector import CardSelector, grid_natural_size
 from .selected_status_bar import SelectedStatusBar
@@ -81,6 +82,7 @@ class MainWindow(QMainWindow):
         self.selected: List[Card] = []
         self.thread: QThread | None = None
         self.worker: SimWorker | None = None
+        self._hw_partition: RankedPartition | None = None  # Stored House Way partition
 
         # ── Build UI ────────────────────────────────────────────
         central = QWidget()
@@ -201,12 +203,30 @@ class MainWindow(QMainWindow):
             len(self.selected) == 7 and not self.thread)
         self.btn_new.setEnabled(self.thread is None)
 
+    def _show_house_way_if_needed(self):
+        """Compute and display House Way when 7 cards are selected.
+        
+        Called when card selection changes — NOT during sim cleanup.
+        """
+        if len(self.selected) == 7:
+            self._hw_partition = house_way_result(self.selected)
+            self.results.clear_results()
+            self.results.show_house_way(
+                self._hw_partition.hi,
+                self._hw_partition.mid,
+                self._hw_partition.low,
+            )
+        else:
+            self.results.clear_results()
+            self._hw_partition = None
+
     def on_card_clicked(self, card: Card):
         if card in self.selected:
             return
         if len(self.selected) < 7:
             self.selected.append(card)
             self.refresh_ui()
+            self._show_house_way_if_needed()
 
     def on_slot_clicked(self, idx: int):
         if self.thread:
@@ -214,12 +234,14 @@ class MainWindow(QMainWindow):
         if idx < len(self.selected):
             del self.selected[idx]
             self.refresh_ui()
+            self._show_house_way_if_needed()
 
     def on_new_hand(self):
         if self.thread:
             return
         self.selected.clear()
         self.results.clear_results()
+        self._hw_partition = None
         self.refresh_ui()
 
     # ── Simulation ─────────────────────────────────────────
@@ -227,7 +249,8 @@ class MainWindow(QMainWindow):
     def on_recommend(self):
         if len(self.selected) != 7 or self.thread:
             return
-        self.results.clear_results()
+        # Clear simulation results but keep House Way
+        self.results.clear_sim_results()
         self.settings.setValue("samples", int(self.samples.value()))
 
         self.thread = QThread()
@@ -266,12 +289,42 @@ class MainWindow(QMainWindow):
 
     def on_sim_finished(self, best, all_results):
         bp = best.rp
-        self.results.show_result(
-            "Best", bp.hi, bp.mid, bp.low, best.win_rate)
-        for alt in all_results[1:4]:
+        
+        # Check if best matches House Way
+        if self._hw_partition is not None:
+            hw = self._hw_partition
+            # Compare partitions by comparing score tuples
+            if (bp.s4.tuple() == hw.s4.tuple() and
+                bp.s2.tuple() == hw.s2.tuple() and
+                bp.s1.tuple() == hw.s1.tuple()):
+                # Best matches House Way - update House Way widget with win rate
+                self.results.mark_house_way_as_best(best.win_rate)
+            else:
+                # Best is different from House Way - show it separately
+                self.results.show_result(
+                    "Best", bp.hi, bp.mid, bp.low, best.win_rate)
+        else:
+            # No House Way (shouldn't happen) - show Best normally
+            self.results.show_result(
+                "Best", bp.hi, bp.mid, bp.low, best.win_rate)
+        
+        # Show alternatives, skipping any that match House Way
+        alt_count = 0
+        for alt in all_results[1:]:
+            if alt_count >= 3:
+                break
             rp = alt.rp
+            # Skip if this alternative matches House Way
+            if self._hw_partition is not None:
+                hw = self._hw_partition
+                if (rp.s4.tuple() == hw.s4.tuple() and
+                    rp.s2.tuple() == hw.s2.tuple() and
+                    rp.s1.tuple() == hw.s1.tuple()):
+                    continue
             self.results.show_result(
                 "Alt", rp.hi, rp.mid, rp.low, alt.win_rate)
+            alt_count += 1
+        
         self._cleanup_thread()
 
     def on_sim_canceled(self):
@@ -362,3 +415,4 @@ class MainWindow(QMainWindow):
         self.settings.setValue(
             "window_size", QSize(self.width(), self.height()))
         super().closeEvent(event)
+
